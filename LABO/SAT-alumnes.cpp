@@ -2,7 +2,7 @@
 #include <stdlib.h>
 #include <algorithm>
 #include <vector>
-#include <set>
+#include <list>
 #include <cmath>
 using namespace std;
 
@@ -18,36 +18,71 @@ vector<int> modelStack;
 uint indexOfNextLitToPropagate;
 uint decisionLevel;
 
-struct varsHFreq {
+struct varsH {
     uint lit;
     uint freq;
+    uint act;
     //aqui se pueden poner futuros atributos de heuristicas mas interesantes supongo?
 };
 
-bool CompH (varsHFreq a, varsHFreq b) {
-    return (a.freq > b.freq);
+bool CompH (varsH a, varsH b) {
+    if (a.act == b.act) return (a.freq > b.freq);
+    else return (a.act > b.act);
 }//funcion sujeta a futuras modificaciones segun mas atributos se incorporen?
 
 uint constant_X; //constante para cambiar entre modos de heuristica
-set<pair<int, int>>setHAct;//set para la actividad
 vector<uint> varFreq; //Frequencia de las variables (sin distinguir si estan negadas)
-vector<varsHFreq> vectorHFreq; //Vector para ordenar heuristicamente las variables
-vector< vector<uint> > vecOcurrPos;//vec de clausulas que contienen la variable para el acceso aleatorio en la propagacion
+vector<uint> varAct;
+vector<varsH> vectorH; //Vector para ordenar heuristicamente las variables
+
+uint nupdate;
+
+
+//vec de clausulas que contienen la variable para el acceso aleatorio en la propagacion
+vector< vector<uint> > vecOcurrPos;
 vector< vector<uint> > vecOcurrNeg;
 
-void computeHeuristic () { //inicializacion de la heuristica
-    vectorHFreq.resize(numVars);
+void computeH () { //inicializacion de la heuristica
+    nupdate = 0;
+    vectorH.resize(numVars);
     for (uint i = 1; i < numVars+1; i++) {
-        vectorHFreq[i-1].lit = i;
-        vectorHFreq[i-1].freq = varFreq[i];
+        vectorH[i-1].lit = i;
+        vectorH[i-1].freq = varFreq[i];
+        vectorH[i-1].act = 0;
     }
-    sort(vectorHFreq.begin(),vectorHFreq.end(),CompH); //sort de mayor a menor frequencia
+    sort(vectorH.begin(),vectorH.end(),CompH); //sort de mayor a menor frequencia
 }
 
-void updateHeuristic (int indexClause) {
-    if ( (modelStack.size()-decisionLevel) > constant_X) {
-        
-        
+void updateHAct (int indexClause) {
+    int l = clauses[indexClause].size();
+    list<uint> to_update;
+    for (int k = 0; k < clauses[indexClause].size(); ++k) {
+        to_update.push_back(abs(clauses[indexClause][k]));
+    }
+    uint i = 0;
+    while ( (i<numVars) and not(to_update.empty()) ) {
+        uint i_lit = vectorH[i].lit;
+        list<uint>::iterator it = to_update.begin();
+        while (it != to_update.end() and (*it) != i_lit ) {
+            ++it;
+        }
+        if (it != to_update.end() and (*it) == i_lit ) {
+            vectorH[i].act += 64;
+            to_update.erase(it);
+        }
+        i++;
+    }
+    if (nupdate >= constant_X) {
+        for (uint i = 0; i < numVars; i++) {
+            uint x = vectorH[i].act - (vectorH[i].act >> 3);
+            if (vectorH[i].act != x) {
+                vectorH[i].act = x;
+            }
+        }
+        sort(vectorH.begin(),vectorH.end(),CompH);
+        nupdate = 0;
+    } else {
+        nupdate++;
     }
 }
 
@@ -65,7 +100,7 @@ void readClauses () {
   varFreq.resize(numVars+1,0);
   vecOcurrPos.resize(numVars+1);
   vecOcurrNeg.resize(numVars+1);
-  constant_X = 5*ceil(log10((float)numVars));
+  constant_X = 30;
   // Read clauses
   for (uint i = 0; i < numClauses; i++) {
     int lit;
@@ -118,7 +153,7 @@ bool propagateGivesConflict () {
         }
       }
       if (not someLitTrue and numUndefs == 0) {
-          updateHeuristic(indexClause);
+          updateHAct(indexClause);
           return true; // conflict! all lits false
       } else if (not someLitTrue and numUndefs == 1) setLiteralToTrue(lastLitUndef);
     }
@@ -145,11 +180,9 @@ void backtrack () {
 
 // Heuristic for finding the next decision literal:
 uint getNextDecisionLiteral () {
-    //solo dedicate a perder tiempo revisando todo si estas al principio (pocas decisiones y pocas propagaciones hechas) ya que recorres solo la parte primera del vector
-    //tambien es un for exaustivo que no he comprobado si actua de hole filler por si la prediccion anterior falla
     uint nextLit_index;
     for (uint i = 0; i < numVars; i++){
-        nextLit_index = vectorHFreq[i].lit;
+        nextLit_index = vectorH[i].lit;
         if (model[nextLit_index] == UNDEF) {
             return nextLit_index;
         }
@@ -172,31 +205,38 @@ void checkmodel () {
 }
 
 int main () {
-  readClauses(); // reads numVars, numClauses and clauses
-  model.resize(numVars+1,UNDEF);
-  indexOfNextLitToPropagate = 0;  
-  decisionLevel = 0;
-  computeHeuristic(); //Prepara y ordena el vector vectorHFreq
-  // Take care of initial unit clauses, if any
-  for (uint i = 0; i < numClauses; ++i)
-    if (clauses[i].size() == 1) {
-      int lit = clauses[i][0];
-      int val = currentValueInModel(lit);
-      if (val == FALSE) {cout << "UNSATISFIABLE" << endl; return 10;}
-      else if (val == UNDEF) setLiteralToTrue(lit);
+    readClauses(); // reads numVars, numClauses and clauses
+    model.resize(numVars+1,UNDEF);
+    indexOfNextLitToPropagate = 0;  
+    decisionLevel = 0;
+    computeH(); //Prepara y ordena heuristicas
+    // Take care of initial unit clauses, if any
+    for (uint i = 0; i < numClauses; ++i) {
+        if (clauses[i].size() == 1) {
+            int lit = clauses[i][0];
+            int val = currentValueInModel(lit);
+            if (val == FALSE) {
+                cout << "UNSATISFIABLE" << endl; return 10;
+            } else if (val == UNDEF) setLiteralToTrue(lit);
+        }
     }
-  // DPLL algorithm
-  while (true) {
-    while ( propagateGivesConflict() ) {
-      if ( decisionLevel == 0) { cout << "UNSATISFIABLE" << endl; return 10; }
-      backtrack();
+    // DPLL algorithm
+    while (true) {
+        while ( propagateGivesConflict() ) {
+            if ( decisionLevel == 0) {
+                cout << "UNSATISFIABLE" << endl; return 10;
+            }
+            backtrack();
+        }
+        uint decisionLit = getNextDecisionLiteral();
+        if (decisionLit == 0) {
+            checkmodel();
+            cout << "SATISFIABLE" << endl; return 20;
+        }
+        // start new decision level:
+        modelStack.push_back(0); // push mark indicating new DL
+        ++indexOfNextLitToPropagate;
+        ++decisionLevel;
+        setLiteralToTrue(decisionLit); // now push decisionLit on top of the mark
     }
-    uint decisionLit = getNextDecisionLiteral();
-    if (decisionLit == 0) { checkmodel(); cout << "SATISFIABLE" << endl; return 20; }
-    // start new decision level:
-    modelStack.push_back(0); // push mark indicating new DL
-    ++indexOfNextLitToPropagate;
-    ++decisionLevel;
-    setLiteralToTrue(decisionLit); // now push decisionLit on top of the mark
-  }
 }  
